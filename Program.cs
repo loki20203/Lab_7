@@ -1,43 +1,86 @@
-﻿public class Program
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+
+class Program
 {
-    public static async Task Main()
+    // Кількість ресурсів
+    static int availableCPU = 3;
+    static int availableRAM = 4;
+    static int availableDisk = 2;
+
+    // Об'єкти для синхронізації
+    static SemaphoreSlim cpuSemaphore = new SemaphoreSlim(availableCPU);
+    static SemaphoreSlim ramSemaphore = new SemaphoreSlim(availableRAM);
+    static SemaphoreSlim diskSemaphore = new SemaphoreSlim(availableDisk);
+    static object priorityLock = new object();
+
+    // Список потоків з чергою за пріоритетами
+    static SortedList<int, Queue<Action>> priorityQueues = new SortedList<int, Queue<Action>>();
+
+    static void Main(string[] args)
     {
-        var nodeA = new DistributedSystemNode("A");
-        var nodeB = new DistributedSystemNode("B");
-        var nodeC = new DistributedSystemNode("C");
+        // Ініціалізація потоків
+        Thread[] threads = new Thread[10];
+        Random rand = new Random();
 
-        nodeA.AddNode(nodeB);
-        nodeA.AddNode(nodeC);
-        nodeB.AddNode(nodeA);
-        nodeB.AddNode(nodeC);
-        nodeC.AddNode(nodeA);
-        nodeC.AddNode(nodeB);
-
-        // Старт обробки подій
-        var processTasks = new List<Task>
+        for (int i = 0; i < threads.Length; i++)
         {
-            nodeA.ProcessEventsAsync(),
-            nodeB.ProcessEventsAsync(),
-            nodeC.ProcessEventsAsync()
-        };
+            int priority = rand.Next(1, 4); // Пріоритет: 1 - високий, 3 - низький
+            threads[i] = new Thread(() => SimulateWork(priority, i));
+            threads[i].Start();
+        }
 
-        // Відправлення повідомлень
-        await nodeA.SendMessageAsync("B", "Hello from A to B");
-        await nodeB.SendMessageAsync("C", "Hello from B to C");
-        await nodeC.SendMessageAsync("A", "Hello from C to A");
+        foreach (var thread in threads)
+            thread.Join();
 
-        // Зміна статусу
-        nodeA.SetStatus(false);
-        nodeB.SetStatus(true);
+        Console.WriteLine("Усі потоки завершені.");
+    }
 
-        // Очікування завершення обробки подій (для демонстраційних цілей)
-        await Task.Delay(5000);
+    static void SimulateWork(int priority, int threadId)
+    {
+        lock (priorityLock)
+        {
+            if (!priorityQueues.ContainsKey(priority))
+                priorityQueues[priority] = new Queue<Action>();
 
-        // Зупинка обробки подій
-        nodeA.SetStatus(false);
-        nodeB.SetStatus(false);
-        nodeC.SetStatus(false);
+            priorityQueues[priority].Enqueue(() =>
+            {
+                Console.WriteLine($"Потік {threadId} із пріоритетом {priority} очікує ресурси.");
 
-        await Task.WhenAll(processTasks);
+                // Отримання ресурсів
+                cpuSemaphore.Wait();
+                ramSemaphore.Wait();
+                diskSemaphore.Wait();
+
+                Console.WriteLine($"Потік {threadId} із пріоритетом {priority} отримав ресурси. Виконується...");
+                Thread.Sleep(2000); // Симуляція роботи
+
+                // Звільнення ресурсів
+                cpuSemaphore.Release();
+                ramSemaphore.Release();
+                diskSemaphore.Release();
+
+                Console.WriteLine($"Потік {threadId} із пріоритетом {priority} завершив роботу.");
+            });
+        }
+
+        ProcessQueues();
+    }
+
+    static void ProcessQueues()
+    {
+        lock (priorityLock)
+        {
+            foreach (var queue in priorityQueues.OrderBy(p => p.Key)) // Вищий пріоритет - нижче число
+            {
+                while (queue.Value.Any())
+                {
+                    var action = queue.Value.Dequeue();
+                    action.Invoke();
+                }
+            }
+        }
     }
 }
