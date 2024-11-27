@@ -6,137 +6,174 @@ using System.Threading;
 
 class Program
 {
-    // Спільний журнал операцій
-    static ConcurrentQueue<Operation> operationLog = new ConcurrentQueue<Operation>();
-
-    // Стан ресурсів
-    static Dictionary<string, string> resourceState = new Dictionary<string, string>();
-    static object resourceLock = new object();
-
-    // Черга конфліктів
-    static ConcurrentQueue<Conflict> conflictQueue = new ConcurrentQueue<Conflict>();
-    static ManualResetEvent conflictEvent = new ManualResetEvent(false);
+    static DistributedSystem distributedSystem = new DistributedSystem();
 
     static void Main(string[] args)
     {
-        // Ініціалізація потоків
-        Thread[] threads = new Thread[5];
-        Random rand = new Random();
+        // Додавання вузлів у систему
+        distributedSystem.AddNode("Node1");
+        distributedSystem.AddNode("Node2");
+        distributedSystem.AddNode("Node3");
 
-        for (int i = 0; i < threads.Length; i++)
+        // Реєстрація обробників подій
+        distributedSystem.Subscribe("Node1", evt => Console.WriteLine($"Node1 отримав подію: {evt}"));
+        distributedSystem.Subscribe("Node2", evt => Console.WriteLine($"Node2 отримав подію: {evt}"));
+        distributedSystem.Subscribe("Node3", evt => Console.WriteLine($"Node3 отримав подію: {evt}"));
+
+        // Створення потоків для реєстрації подій
+        var threads = new List<Thread>
         {
-            int threadId = i;
-            threads[i] = new Thread(() => PerformOperations(threadId, rand));
-            threads[i].Start();
-        }
+            new Thread(() => distributedSystem.TriggerEvent("Node1", "Подія A")),
+            new Thread(() => distributedSystem.TriggerEvent("Node2", "Подія B")),
+            new Thread(() => distributedSystem.TriggerEvent("Node3", "Подія C")),
+        };
 
-        // Потік для обробки конфліктів
-        Thread conflictResolverThread = new Thread(ResolveConflicts);
-        conflictResolverThread.Start();
+        threads.ForEach(t => t.Start());
+        threads.ForEach(t => t.Join());
 
-        foreach (var thread in threads)
-            thread.Join();
+        // Динамічне додавання вузла
+        distributedSystem.AddNode("Node4");
+        distributedSystem.Subscribe("Node4", evt => Console.WriteLine($"Node4 отримав подію: {evt}"));
+        distributedSystem.TriggerEvent("Node4", "Подія D");
 
-        // Завершення роботи обробника конфліктів
-        conflictEvent.Set();
-        conflictResolverThread.Join();
+        // Динамічне видалення вузла
+        distributedSystem.RemoveNode("Node2");
 
-        Console.WriteLine("\nЖурнал операцій:");
-        foreach (var operation in operationLog)
-            Console.WriteLine(operation);
-    }
+        // Реєстрація подій після видалення
+        distributedSystem.TriggerEvent("Node1", "Подія E");
+        distributedSystem.TriggerEvent("Node3", "Подія F");
 
-    static void PerformOperations(int threadId, Random rand)
-    {
-        for (int i = 0; i < 5; i++) // Кожен потік виконує 5 операцій
+        Console.WriteLine("\nЛог подій (впорядкований):");
+        foreach (var evt in distributedSystem.GetEventLog())
         {
-            string resourceName = $"Resource{rand.Next(1, 4)}"; // Випадковий ресурс
-            string newValue = $"Value{rand.Next(1, 100)}";
-
-            var operation = new Operation
-            {
-                Timestamp = DateTime.UtcNow,
-                ThreadId = threadId,
-                Resource = resourceName,
-                NewValue = newValue
-            };
-
-            lock (resourceLock)
-            {
-                if (resourceState.TryGetValue(resourceName, out string currentValue) && currentValue != newValue)
-                {
-                    // Конфлікт
-                    Console.WriteLine($"[Конфлікт] Потік {threadId} намагається змінити {resourceName}. Поточне значення: {currentValue}, нове: {newValue}");
-                    conflictQueue.Enqueue(new Conflict
-                    {
-                        Resource = resourceName,
-                        Operation1 = new Operation { Timestamp = DateTime.UtcNow, Resource = resourceName, NewValue = currentValue },
-                        Operation2 = operation
-                    });
-                    conflictEvent.Set();
-                }
-                else
-                {
-                    // Операція без конфлікту
-                    resourceState[resourceName] = newValue;
-                    operationLog.Enqueue(operation);
-                    Console.WriteLine($"[Успішно] Потік {threadId} змінив {resourceName} на {newValue}");
-                }
-            }
-
-            Thread.Sleep(rand.Next(100, 500)); // Затримка для моделювання роботи
-        }
-    }
-
-    static void ResolveConflicts()
-    {
-        while (true)
-        {
-            conflictEvent.WaitOne(); // Очікування нових конфліктів
-
-            while (conflictQueue.TryDequeue(out var conflict))
-            {
-                Console.WriteLine($"[Розв'язання] Конфлікт для {conflict.Resource}:");
-                Console.WriteLine($"    Операція 1: {conflict.Operation1}");
-                Console.WriteLine($"    Операція 2: {conflict.Operation2}");
-
-                // Проста політика: вибір останньої операції за часовою міткою
-                var resolvedOperation = conflict.Operation2.Timestamp > conflict.Operation1.Timestamp
-                    ? conflict.Operation2
-                    : conflict.Operation1;
-
-                lock (resourceLock)
-                {
-                    resourceState[conflict.Resource] = resolvedOperation.NewValue;
-                    operationLog.Enqueue(resolvedOperation);
-                    Console.WriteLine($"[Рішення] {conflict.Resource} встановлено в {resolvedOperation.NewValue}");
-                }
-            }
-
-            if (conflictQueue.IsEmpty)
-                conflictEvent.Reset(); // Повернення у режим очікування
+            Console.WriteLine(evt);
         }
     }
 }
 
-// Клас для моделювання операції
-class Operation
+// Клас для моделювання події
+class Event
 {
-    public DateTime Timestamp { get; set; }
-    public int ThreadId { get; set; }
-    public string Resource { get; set; }
-    public string NewValue { get; set; }
+    public string SourceNode { get; set; }
+    public string EventDescription { get; set; }
+    public int Timestamp { get; set; }
 
     public override string ToString()
     {
-        return $"[{Timestamp:HH:mm:ss.fff}] Потік {ThreadId} змінив {Resource} на {NewValue}";
+        return $"[{Timestamp}] {SourceNode}: {EventDescription}";
     }
 }
 
-// Клас для моделювання конфлікту
-class Conflict
+// Клас для вузла розподіленої системи
+class Node
 {
-    public string Resource { get; set; }
-    public Operation Operation1 { get; set; }
-    public Operation Operation2 { get; set; }
+    public string NodeName { get; }
+    public int LogicalClock { get; private set; }
+    public Action<Event> EventHandler { get; private set; }
+
+    public Node(string nodeName)
+    {
+        NodeName = nodeName;
+        LogicalClock = 0;
+    }
+
+    public void SetEventHandler(Action<Event> handler)
+    {
+        EventHandler = handler;
+    }
+
+    public void TriggerEvent(string description, ConcurrentQueue<Event> globalEventLog)
+    {
+        lock (this)
+        {
+            LogicalClock++;
+            var evt = new Event
+            {
+                SourceNode = NodeName,
+                EventDescription = description,
+                Timestamp = LogicalClock
+            };
+
+            globalEventLog.Enqueue(evt);
+            EventHandler?.Invoke(evt);
+        }
+    }
+
+    public void ReceiveEvent(Event evt)
+    {
+        lock (this)
+        {
+            LogicalClock = Math.Max(LogicalClock, evt.Timestamp) + 1;
+            EventHandler?.Invoke(evt);
+        }
+    }
+}
+
+// Клас для розподіленої системи
+class DistributedSystem
+{
+    private readonly Dictionary<string, Node> nodes = new Dictionary<string, Node>();
+    private readonly ConcurrentQueue<Event> globalEventLog = new ConcurrentQueue<Event>();
+    private readonly object nodeLock = new object();
+
+    public void AddNode(string nodeName)
+    {
+        lock (nodeLock)
+        {
+            if (!nodes.ContainsKey(nodeName))
+            {
+                var node = new Node(nodeName);
+                nodes[nodeName] = node;
+                Console.WriteLine($"Вузол {nodeName} додано до системи.");
+            }
+        }
+    }
+
+    public void RemoveNode(string nodeName)
+    {
+        lock (nodeLock)
+        {
+            if (nodes.Remove(nodeName))
+            {
+                Console.WriteLine($"Вузол {nodeName} видалено з системи.");
+            }
+        }
+    }
+
+    public void Subscribe(string nodeName, Action<Event> handler)
+    {
+        lock (nodeLock)
+        {
+            if (nodes.TryGetValue(nodeName, out var node))
+            {
+                node.SetEventHandler(handler);
+                Console.WriteLine($"Вузол {nodeName} підписано на події.");
+            }
+        }
+    }
+
+    public void TriggerEvent(string nodeName, string description)
+    {
+        lock (nodeLock)
+        {
+            if (nodes.TryGetValue(nodeName, out var node))
+            {
+                node.TriggerEvent(description, globalEventLog);
+
+                // Передача події всім іншим вузлам
+                foreach (var otherNode in nodes.Values.Where(n => n.NodeName != nodeName))
+                {
+                    foreach (var evt in globalEventLog)
+                    {
+                        otherNode.ReceiveEvent(evt);
+                    }
+                }
+            }
+        }
+    }
+
+    public List<Event> GetEventLog()
+    {
+        return globalEventLog.OrderBy(e => e.Timestamp).ToList();
+    }
 }
