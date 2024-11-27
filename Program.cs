@@ -1,86 +1,142 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 
 class Program
 {
-    // Кількість ресурсів
-    static int availableCPU = 3;
-    static int availableRAM = 4;
-    static int availableDisk = 2;
+    // Спільний журнал операцій
+    static ConcurrentQueue<Operation> operationLog = new ConcurrentQueue<Operation>();
 
-    // Об'єкти для синхронізації
-    static SemaphoreSlim cpuSemaphore = new SemaphoreSlim(availableCPU);
-    static SemaphoreSlim ramSemaphore = new SemaphoreSlim(availableRAM);
-    static SemaphoreSlim diskSemaphore = new SemaphoreSlim(availableDisk);
-    static object priorityLock = new object();
+    // Стан ресурсів
+    static Dictionary<string, string> resourceState = new Dictionary<string, string>();
+    static object resourceLock = new object();
 
-    // Список потоків з чергою за пріоритетами
-    static SortedList<int, Queue<Action>> priorityQueues = new SortedList<int, Queue<Action>>();
+    // Черга конфліктів
+    static ConcurrentQueue<Conflict> conflictQueue = new ConcurrentQueue<Conflict>();
+    static ManualResetEvent conflictEvent = new ManualResetEvent(false);
 
     static void Main(string[] args)
     {
         // Ініціалізація потоків
-        Thread[] threads = new Thread[10];
+        Thread[] threads = new Thread[5];
         Random rand = new Random();
 
         for (int i = 0; i < threads.Length; i++)
         {
-            int priority = rand.Next(1, 4); // Пріоритет: 1 - високий, 3 - низький
-            threads[i] = new Thread(() => SimulateWork(priority, i));
+            int threadId = i;
+            threads[i] = new Thread(() => PerformOperations(threadId, rand));
             threads[i].Start();
         }
+
+        // Потік для обробки конфліктів
+        Thread conflictResolverThread = new Thread(ResolveConflicts);
+        conflictResolverThread.Start();
 
         foreach (var thread in threads)
             thread.Join();
 
-        Console.WriteLine("Усі потоки завершені.");
+        // Завершення роботи обробника конфліктів
+        conflictEvent.Set();
+        conflictResolverThread.Join();
+
+        Console.WriteLine("\nЖурнал операцій:");
+        foreach (var operation in operationLog)
+            Console.WriteLine(operation);
     }
 
-    static void SimulateWork(int priority, int threadId)
+    static void PerformOperations(int threadId, Random rand)
     {
-        lock (priorityLock)
+        for (int i = 0; i < 5; i++) // Кожен потік виконує 5 операцій
         {
-            if (!priorityQueues.ContainsKey(priority))
-                priorityQueues[priority] = new Queue<Action>();
+            string resourceName = $"Resource{rand.Next(1, 4)}"; // Випадковий ресурс
+            string newValue = $"Value{rand.Next(1, 100)}";
 
-            priorityQueues[priority].Enqueue(() =>
+            var operation = new Operation
             {
-                Console.WriteLine($"Потік {threadId} із пріоритетом {priority} очікує ресурси.");
+                Timestamp = DateTime.UtcNow,
+                ThreadId = threadId,
+                Resource = resourceName,
+                NewValue = newValue
+            };
 
-                // Отримання ресурсів
-                cpuSemaphore.Wait();
-                ramSemaphore.Wait();
-                diskSemaphore.Wait();
-
-                Console.WriteLine($"Потік {threadId} із пріоритетом {priority} отримав ресурси. Виконується...");
-                Thread.Sleep(2000); // Симуляція роботи
-
-                // Звільнення ресурсів
-                cpuSemaphore.Release();
-                ramSemaphore.Release();
-                diskSemaphore.Release();
-
-                Console.WriteLine($"Потік {threadId} із пріоритетом {priority} завершив роботу.");
-            });
-        }
-
-        ProcessQueues();
-    }
-
-    static void ProcessQueues()
-    {
-        lock (priorityLock)
-        {
-            foreach (var queue in priorityQueues.OrderBy(p => p.Key)) // Вищий пріоритет - нижче число
+            lock (resourceLock)
             {
-                while (queue.Value.Any())
+                if (resourceState.TryGetValue(resourceName, out string currentValue) && currentValue != newValue)
                 {
-                    var action = queue.Value.Dequeue();
-                    action.Invoke();
+                    // Конфлікт
+                    Console.WriteLine($"[Конфлікт] Потік {threadId} намагається змінити {resourceName}. Поточне значення: {currentValue}, нове: {newValue}");
+                    conflictQueue.Enqueue(new Conflict
+                    {
+                        Resource = resourceName,
+                        Operation1 = new Operation { Timestamp = DateTime.UtcNow, Resource = resourceName, NewValue = currentValue },
+                        Operation2 = operation
+                    });
+                    conflictEvent.Set();
+                }
+                else
+                {
+                    // Операція без конфлікту
+                    resourceState[resourceName] = newValue;
+                    operationLog.Enqueue(operation);
+                    Console.WriteLine($"[Успішно] Потік {threadId} змінив {resourceName} на {newValue}");
                 }
             }
+
+            Thread.Sleep(rand.Next(100, 500)); // Затримка для моделювання роботи
         }
     }
+
+    static void ResolveConflicts()
+    {
+        while (true)
+        {
+            conflictEvent.WaitOne(); // Очікування нових конфліктів
+
+            while (conflictQueue.TryDequeue(out var conflict))
+            {
+                Console.WriteLine($"[Розв'язання] Конфлікт для {conflict.Resource}:");
+                Console.WriteLine($"    Операція 1: {conflict.Operation1}");
+                Console.WriteLine($"    Операція 2: {conflict.Operation2}");
+
+                // Проста політика: вибір останньої операції за часовою міткою
+                var resolvedOperation = conflict.Operation2.Timestamp > conflict.Operation1.Timestamp
+                    ? conflict.Operation2
+                    : conflict.Operation1;
+
+                lock (resourceLock)
+                {
+                    resourceState[conflict.Resource] = resolvedOperation.NewValue;
+                    operationLog.Enqueue(resolvedOperation);
+                    Console.WriteLine($"[Рішення] {conflict.Resource} встановлено в {resolvedOperation.NewValue}");
+                }
+            }
+
+            if (conflictQueue.IsEmpty)
+                conflictEvent.Reset(); // Повернення у режим очікування
+        }
+    }
+}
+
+// Клас для моделювання операції
+class Operation
+{
+    public DateTime Timestamp { get; set; }
+    public int ThreadId { get; set; }
+    public string Resource { get; set; }
+    public string NewValue { get; set; }
+
+    public override string ToString()
+    {
+        return $"[{Timestamp:HH:mm:ss.fff}] Потік {ThreadId} змінив {Resource} на {NewValue}";
+    }
+}
+
+// Клас для моделювання конфлікту
+class Conflict
+{
+    public string Resource { get; set; }
+    public Operation Operation1 { get; set; }
+    public Operation Operation2 { get; set; }
 }
